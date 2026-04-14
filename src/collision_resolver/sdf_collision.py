@@ -7,6 +7,8 @@ import numpy as np
 import open3d as o3d
 from loguru import logger
 
+from collision_resolver.mesh_repair import ensure_watertight_mesh
+
 
 @dataclass
 class DirectionCollisionResult:
@@ -68,8 +70,6 @@ def load_mesh(mesh_path: str | Path) -> o3d.geometry.TriangleMesh:
         raise ValueError(f"Failed to load mesh or mesh is empty: {path}")
     if len(mesh.triangles) == 0:
         raise ValueError(f"Mesh has no triangles: {path}")
-
-    mesh.compute_vertex_normals()
     logger.info(
         "Loaded mesh {}: {} vertices, {} triangles",
         path,
@@ -77,11 +77,8 @@ def load_mesh(mesh_path: str | Path) -> o3d.geometry.TriangleMesh:
         len(mesh.triangles),
     )
 
-    if hasattr(mesh, "is_watertight") and not mesh.is_watertight():
-        logger.warning(
-            "Mesh {} is not watertight. Signed-distance results may be unstable.",
-            path,
-        )
+    mesh = ensure_watertight_mesh(mesh, mesh_label=path)
+    mesh.compute_vertex_normals()
     return mesh
 
 
