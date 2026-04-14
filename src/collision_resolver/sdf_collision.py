@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import open3d as o3d
 from loguru import logger
 
 from collision_resolver.mesh_repair import ensure_watertight_mesh
+
+SDFQueryFn = Callable[[np.ndarray], np.ndarray]
 
 
 @dataclass
@@ -208,7 +211,7 @@ def query_sdf_gradient(
 
 
 def analyze_direction(
-    scene: o3d.t.geometry.RaycastingScene,
+    sdf_query: SDFQueryFn,
     sampled_mesh: o3d.geometry.TriangleMesh,
     sample_count: int,
     label: str,
@@ -216,7 +219,7 @@ def analyze_direction(
     sampled_pcd = sampled_mesh.sample_points_uniformly(number_of_points=sample_count)
     sampled_points = np.asarray(sampled_pcd.points)
 
-    sdf_values = query_sdf(scene, sampled_points)
+    sdf_values = sdf_query(sampled_points)
     penetration_mask = sdf_values < 0.0
     penetration_points = sampled_points[penetration_mask]
 
@@ -259,18 +262,36 @@ def detect_collision(
     mesh_b: o3d.geometry.TriangleMesh,
     sample_count_a: int,
     sample_count_b: int,
+    *,
+    sdf_query_a: SDFQueryFn | None = None,
+    sdf_query_b: SDFQueryFn | None = None,
 ) -> CollisionReport:
-    scene_a = build_raycast_scene(mesh_a)
-    scene_b = build_raycast_scene(mesh_b)
+    if sdf_query_a is None:
+        scene_a = build_raycast_scene(mesh_a)
+
+        def query_a(points: np.ndarray) -> np.ndarray:
+            return query_sdf(scene_a, points)
+
+    else:
+        query_a = sdf_query_a
+
+    if sdf_query_b is None:
+        scene_b = build_raycast_scene(mesh_b)
+
+        def query_b(points: np.ndarray) -> np.ndarray:
+            return query_sdf(scene_b, points)
+
+    else:
+        query_b = sdf_query_b
 
     result_b_in_a = analyze_direction(
-        scene=scene_a,
+        sdf_query=query_a,
         sampled_mesh=mesh_b,
         sample_count=sample_count_b,
         label="Mesh B surface inside Mesh A SDF",
     )
     result_a_in_b = analyze_direction(
-        scene=scene_b,
+        sdf_query=query_b,
         sampled_mesh=mesh_a,
         sample_count=sample_count_a,
         label="Mesh A surface inside Mesh B SDF",

@@ -9,6 +9,10 @@ import trimesh
 from loguru import logger
 
 
+class WatertightRepairError(RuntimeError):
+    """Raised when a mesh cannot be repaired to watertight."""
+
+
 def _cleanup_mesh_topology(mesh: o3d.geometry.TriangleMesh) -> None:
     mesh.remove_duplicated_vertices()
     mesh.remove_duplicated_triangles()
@@ -36,7 +40,7 @@ def _repair_with_voxel_reconstruction(
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     triangles = np.asarray(mesh.triangles, dtype=np.int32)
     if vertices.size == 0 or triangles.size == 0:
-        raise ValueError("Input mesh is empty before volumetric repair.")
+        raise WatertightRepairError("Input mesh is empty before volumetric repair.")
 
     tri_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, process=False)
     voxels = tri_mesh.voxelized(pitch=voxel_pitch)
@@ -90,15 +94,15 @@ def ensure_watertight_mesh(
             voxel_pitch_ratio=1e-2,
         )
     except Exception as exc:
-        raise RuntimeError(
+        raise WatertightRepairError(
             f"Failed to repair non-watertight mesh {label} with volumetric reconstruction."
         ) from exc
 
     _cleanup_mesh_topology(repaired)
     if repaired.is_empty() or len(repaired.triangles) == 0:
-        raise ValueError(f"Mesh repair produced an empty mesh: {label}")
+        raise WatertightRepairError(f"Mesh repair produced an empty mesh: {label}")
     if not repaired.is_watertight():
-        raise ValueError(
+        raise WatertightRepairError(
             f"Mesh repair failed. Mesh is still not watertight: {label}."
         )
 

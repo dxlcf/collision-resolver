@@ -19,6 +19,32 @@
 
 修复完成且通过 watertight 校验后，才会继续执行 SDF 检测与修复流程；若修复失败会直接报错，避免不稳定 SDF 结果。
 
+## 批量预处理与SDF缓存
+
+支持将网格预处理步骤独立执行：
+
+1. 网格加载与 watertight 修复。
+2. SDF 体素缓存构建。
+
+默认缓存目录为 `data/sdf_cache`，每个模型按“文件名（不含后缀）”建立独立缓存子目录。
+
+批处理命令（默认输入 `data/models_eval`）：
+
+```bash
+uv run collision-resolver-preprocess
+```
+
+指定输入目录与缓存目录：
+
+```bash
+uv run collision-resolver-preprocess data/models_eval --cache-dir data/sdf_cache
+```
+
+脚本会在汇总中输出：
+
+- watertight 修复失败模型数。
+- 是否存在 watertight 修复失败模型（YES/NO）。
+
 ## 环境与依赖（uv）
 
 项目使用 `uv` 管理环境与依赖：
@@ -38,6 +64,8 @@ uv sync --extra visualize
 ```bash
 uv run collision-resolver <mesh_a> <mesh_b> [options]
 ```
+
+运行时会先根据输入网格文件名（不含后缀）在 `data/sdf_cache` 中查找预处理缓存；命中则直接使用缓存的 watertight 网格与 SDF，跳过网格预处理。
 
 示例：仅检测
 
@@ -70,8 +98,12 @@ uv run collision-resolver data/a.obj data/b.obj \
 - `--safety-margin` / `--safety-margin-ratio`：每步平移安全裕度。
 - `--resolve`：启用平移修复。
 - `--visualize` / `--resolve-visualize`：启用可视化。
+- `--sdf-cache-dir`：指定预处理缓存目录（默认 `data/sdf_cache`）。
+- `--rebuild-preprocess-cache`：强制重建输入网格的预处理缓存。
 
 ## 代码结构
 
 - `src/collision_resolver/sdf_collision.py`：SDF 检测与修复核心算法。
 - `src/collision_resolver/cli.py`：命令行入口。
+- `src/collision_resolver/preprocess_cache.py`：网格预处理与SDF缓存模块。
+- `src/collision_resolver/preprocess_models.py`：批量预处理脚本入口。

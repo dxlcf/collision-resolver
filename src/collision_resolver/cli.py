@@ -8,12 +8,16 @@ import numpy as np
 import open3d as o3d
 from loguru import logger
 
+from collision_resolver.preprocess_cache import (
+    DEFAULT_CACHE_DIR,
+    create_cached_sdf_query,
+    preprocess_mesh_with_cache,
+)
 from collision_resolver.sdf_collision import (
     CollisionReport,
     DirectionCollisionResult,
     ResolveReport,
     detect_collision,
-    load_mesh,
     resolve_collision_by_translation,
     resolve_runtime_parameters,
 )
@@ -119,6 +123,17 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Write the resolved mesh B to this path after --resolve finishes.",
+    )
+    parser.add_argument(
+        "--sdf-cache-dir",
+        type=str,
+        default=str(DEFAULT_CACHE_DIR),
+        help="Directory for preprocessed watertight mesh and SDF cache.",
+    )
+    parser.add_argument(
+        "--rebuild-preprocess-cache",
+        action="store_true",
+        help="Force rebuilding mesh preprocess cache even if cache already exists.",
     )
     return parser.parse_args()
 
@@ -263,13 +278,40 @@ def run(args: argparse.Namespace) -> None:
     if args.output_resolved_mesh is not None:
         args.resolve = True
 
-    mesh_a = load_mesh(args.mesh_a)
-    mesh_b = load_mesh(args.mesh_b)
+    cache_root = Path(args.sdf_cache_dir)
+    mesh_a_asset = preprocess_mesh_with_cache(
+        args.mesh_a,
+        cache_root=cache_root,
+        force_rebuild=args.rebuild_preprocess_cache,
+    )
+    mesh_b_asset = preprocess_mesh_with_cache(
+        args.mesh_b,
+        cache_root=cache_root,
+        force_rebuild=args.rebuild_preprocess_cache,
+    )
+    logger.info(
+        "Preprocess cache: mesh_a={}, mesh_b={}",
+        "hit" if mesh_a_asset.cache_hit else "build",
+        "hit" if mesh_b_asset.cache_hit else "build",
+    )
+
+    mesh_a = copy.deepcopy(mesh_a_asset.mesh)
+    mesh_b = copy.deepcopy(mesh_b_asset.mesh)
 
     offset = np.asarray(args.offset, dtype=float)
     if np.any(offset != 0.0):
         logger.info("Applying translation to mesh B: {}", offset.tolist())
         mesh_b.translate(offset)
+
+    sdf_query_a = create_cached_sdf_query(
+        mesh_a_asset.sdf_volume,
+        mesh_a_asset.mesh,
+    )
+    sdf_query_b_before = create_cached_sdf_query(
+        mesh_b_asset.sdf_volume,
+        mesh_b_asset.mesh,
+        translation=offset,
+    )
 
     runtime = resolve_runtime_parameters(
         mesh_a,
@@ -290,6 +332,8 @@ def run(args: argparse.Namespace) -> None:
         mesh_b,
         runtime.sample_count_a,
         runtime.sample_count_b,
+        sdf_query_a=sdf_query_a,
+        sdf_query_b=sdf_query_b_before,
     )
 
     print_header(args, offset, collision_before, runtime)
@@ -309,11 +353,20 @@ def run(args: argparse.Namespace) -> None:
             max_iters=args.max_resolve_iters,
             safety_margin=runtime.safety_margin,
         )
+
+        post_translation = offset + resolve_result.total_translation
+        sdf_query_b_after = create_cached_sdf_query(
+            mesh_b_asset.sdf_volume,
+            mesh_b_asset.mesh,
+            translation=post_translation,
+        )
         collision_after = detect_collision(
             mesh_a,
             mesh_b,
             runtime.sample_count_a,
             runtime.sample_count_b,
+            sdf_query_a=sdf_query_a,
+            sdf_query_b=sdf_query_b_after,
         )
         print_resolve_result(resolve_result, collision_after)
 

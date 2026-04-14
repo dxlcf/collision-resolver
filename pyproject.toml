@@ -23,6 +23,7 @@ visualize = [
 
 [project.scripts]
 collision-resolver = "collision_resolver.cli:main"
+collision-resolver-preprocess = "collision_resolver.preprocess_models:main"
 
 [tool.uv]
 package = true
