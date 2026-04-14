@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "collision-resolver"
+version = "0.1.0"
+description = "SDF-driven mesh collision detection and translation-based resolution."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "loguru>=0.7.2",
+    "numpy>=1.26.0",
+    "open3d>=0.18.0",
+]
+
+[project.optional-dependencies]
+visualize = [
+    "pyvista>=0.47.0",
+]
+
+[project.scripts]
+collision-resolver = "collision_resolver.cli:main"
+
+[tool.uv]
+package = true
