@@ -9,6 +9,7 @@
 - Symmetric bidirectional loss (`B -> A` and `A -> B`)
 - Offline cache of watertight mesh, SDF volume, and surface point cloud
 - Joint A/B pose optimization (both 4x4 transforms are updated together)
+- Three joint optimization modes: translation-only, rotation-only, or full 6DoF
 - Runtime inputs: two mesh paths and two optional 4x4 transforms
 - Identity transforms are used by default when transforms are omitted
 - Penetration statistics, total loss, and collision bbox reporting
@@ -101,6 +102,30 @@ uv run collision-resolver data/a.obj data/b.obj \
     --max-opt-iters 20
 ```
 
+Example: translation-only optimization
+
+```bash
+uv run collision-resolver data/a.obj data/b.obj \
+    --optimize \
+    --optimize-mode translation
+```
+
+Example: rotation-only optimization
+
+```bash
+uv run collision-resolver data/a.obj data/b.obj \
+    --optimize \
+    --optimize-mode rotation
+```
+
+Example: full 6DoF optimization
+
+```bash
+uv run collision-resolver data/a.obj data/b.obj \
+    --optimize \
+    --optimize-mode 6dof
+```
+
 Example: optimize with before/after visualization
 
 ```bash
@@ -118,6 +143,7 @@ uv run collision-resolver data/a.obj data/b.obj \
 - `--surface-point-count`: offline surface sample count used during cache build
 - `--voxel-size-ratio` / `--padding-ratio` / `--max-grid-dim`: SDF cache parameters
 - `--optimize`: enable joint optimization for A/B transforms
+- `--optimize-mode`: choose `translation`, `rotation`, or `6dof`
 - `--max-opt-iters`: max optimization iterations
 - `--opt-grad-eps`: central-difference epsilon for optimization gradients
 - `--opt-init-step` / `--opt-backtrack-factor` / `--opt-armijo-c`: backtracking line-search controls

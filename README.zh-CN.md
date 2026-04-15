@@ -16,6 +16,7 @@ $$
 - 对称双向损失：`B -> A` 与 `A -> B`
 - 离线缓存 watertight 网格、SDF 体素与表面点集
 - 支持 A/B 位姿联合优化（同时更新两个 4x4 变换矩阵）
+- 支持三种联合优化模式：只优化平移、只优化旋转、全 6DoF
 - 运行时输入两个模型路径与两个 4x4 变换矩阵
 - 若未提供变换矩阵，默认使用单位矩阵（保持原始位姿）
 - 输出双向穿透统计、总损失与碰撞包围盒
@@ -105,6 +106,30 @@ uv run collision-resolver data/open_box.ply data/inner_cube.ply \
     --max-opt-iters 20
 ```
 
+示例 4.1：只优化平移
+
+```bash
+uv run collision-resolver data/open_box.ply data/inner_cube.ply \
+    --optimize \
+    --optimize-mode translation
+```
+
+示例 4.2：只优化旋转
+
+```bash
+uv run collision-resolver data/open_box.ply data/inner_cube.ply \
+    --optimize \
+    --optimize-mode rotation
+```
+
+示例 4.3：全 6DoF 优化
+
+```bash
+uv run collision-resolver data/open_box.ply data/inner_cube.ply \
+    --optimize \
+    --optimize-mode 6dof
+```
+
 示例 5：联合优化并可视化优化前后
 
 ```bash
@@ -122,6 +147,7 @@ uv run collision-resolver data/open_box.ply data/inner_cube.ply \
 - `--surface-point-count`：离线表面点集采样数（缓存构建时使用）
 - `--voxel-size-ratio` / `--padding-ratio` / `--max-grid-dim`：SDF 体素缓存参数
 - `--optimize`：启用 A/B 联合优化
+- `--optimize-mode`：联合优化模式，可选 `translation`、`rotation`、`6dof`
 - `--max-opt-iters`：联合优化最大迭代数
 - `--opt-grad-eps`：联合优化数值梯度的中心差分步长
 - `--opt-init-step` / `--opt-backtrack-factor` / `--opt-armijo-c`：回溯线搜索参数

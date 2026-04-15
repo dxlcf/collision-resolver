@@ -60,8 +60,34 @@ class _LossContext:
     scene_b: o3d.t.geometry.RaycastingScene
 
 
+OPTIMIZE_MODE_TRANSLATION = "translation"
+OPTIMIZE_MODE_ROTATION = "rotation"
+OPTIMIZE_MODE_6DOF = "6dof"
+OPTIMIZE_MODE_CHOICES = (
+    OPTIMIZE_MODE_TRANSLATION,
+    OPTIMIZE_MODE_ROTATION,
+    OPTIMIZE_MODE_6DOF,
+)
+
+
 def identity_transform() -> np.ndarray:
     return np.eye(4, dtype=np.float64)
+
+
+def normalize_optimize_mode(optimize_mode: str) -> str:
+    mode = str(optimize_mode).strip().lower()
+    if mode not in OPTIMIZE_MODE_CHOICES:
+        raise ValueError(
+            "optimize_mode must be one of: translation, rotation, 6dof."
+        )
+    return mode
+
+
+def pose_delta_size(optimize_mode: str) -> int:
+    mode = normalize_optimize_mode(optimize_mode)
+    if mode == OPTIMIZE_MODE_6DOF:
+        return 6
+    return 3
 
 
 def validate_transform_matrix(transform: np.ndarray, label: str) -> np.ndarray:
@@ -203,18 +229,43 @@ def se3_delta_matrix(delta: np.ndarray) -> np.ndarray:
     return transform
 
 
+def pose_delta_matrix(delta: np.ndarray, optimize_mode: str) -> np.ndarray:
+    mode = normalize_optimize_mode(optimize_mode)
+    delta_vec = np.asarray(delta, dtype=np.float64)
+
+    transform = np.eye(4, dtype=np.float64)
+    if mode == OPTIMIZE_MODE_TRANSLATION:
+        if delta_vec.shape != (3,):
+            raise ValueError("Translation-only delta must have shape (3,).")
+        transform[:3, 3] = delta_vec
+        return transform
+
+    if mode == OPTIMIZE_MODE_ROTATION:
+        if delta_vec.shape != (3,):
+            raise ValueError("Rotation-only delta must have shape (3,).")
+        transform[:3, :3] = _exp_so3(delta_vec)
+        return transform
+
+    if delta_vec.shape != (6,):
+        raise ValueError("6DoF delta must have shape (6,).")
+    return se3_delta_matrix(delta_vec)
+
+
 def apply_joint_delta(
     *,
     transform_a: np.ndarray,
     transform_b: np.ndarray,
     joint_delta: np.ndarray,
+    optimize_mode: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     delta_vec = np.asarray(joint_delta, dtype=np.float64)
-    if delta_vec.shape != (12,):
-        raise ValueError("Joint delta must have shape (12,).")
+    dof_size = pose_delta_size(optimize_mode)
+    expected_shape = (2 * dof_size,)
+    if delta_vec.shape != expected_shape:
+        raise ValueError(f"Joint delta must have shape {expected_shape} for optimize_mode={optimize_mode}.")
 
-    delta_a = se3_delta_matrix(delta_vec[:6])
-    delta_b = se3_delta_matrix(delta_vec[6:])
+    delta_a = pose_delta_matrix(delta_vec[:dof_size], optimize_mode)
+    delta_b = pose_delta_matrix(delta_vec[dof_size:], optimize_mode)
     updated_a = delta_a @ transform_a
     updated_b = delta_b @ transform_b
     return updated_a, updated_b
@@ -226,21 +277,26 @@ def _finite_difference_gradient(
     transform_a: np.ndarray,
     transform_b: np.ndarray,
     grad_eps: float,
+    optimize_mode: str,
 ) -> np.ndarray:
-    gradient = np.zeros((12,), dtype=np.float64)
-    for index in range(12):
-        delta = np.zeros((12,), dtype=np.float64)
+    dof_size = pose_delta_size(optimize_mode)
+    total_size = 2 * dof_size
+    gradient = np.zeros((total_size,), dtype=np.float64)
+    for index in range(total_size):
+        delta = np.zeros((total_size,), dtype=np.float64)
         delta[index] = grad_eps
 
         plus_a, plus_b = apply_joint_delta(
             transform_a=transform_a,
             transform_b=transform_b,
             joint_delta=delta,
+            optimize_mode=optimize_mode,
         )
         minus_a, minus_b = apply_joint_delta(
             transform_a=transform_a,
             transform_b=transform_b,
             joint_delta=-delta,
+            optimize_mode=optimize_mode,
         )
 
         loss_plus = _evaluate_symmetric_collision_loss_with_context(
@@ -315,6 +371,7 @@ def optimize_joint_transforms(
     asset_b: PreprocessedMeshAsset,
     transform_a_init: np.ndarray,
     transform_b_init: np.ndarray,
+    optimize_mode: str = OPTIMIZE_MODE_6DOF,
     max_iters: int = 30,
     grad_eps: float = 1e-4,
     init_step: float = 1.0,
@@ -326,6 +383,7 @@ def optimize_joint_transforms(
 ) -> JointOptimizationReport:
     if max_iters <= 0:
         raise ValueError("max_iters must be a positive integer.")
+    optimize_mode = normalize_optimize_mode(optimize_mode)
     if grad_eps <= 0.0:
         raise ValueError("grad_eps must be positive.")
     if init_step <= 0.0:
@@ -378,6 +436,7 @@ def optimize_joint_transforms(
             transform_a=transform_a,
             transform_b=transform_b,
             grad_eps=grad_eps,
+            optimize_mode=optimize_mode,
         )
         grad_norm = float(np.linalg.norm(gradient))
         if grad_norm <= grad_tol:
@@ -410,6 +469,7 @@ def optimize_joint_transforms(
                 transform_a=transform_a,
                 transform_b=transform_b,
                 joint_delta=step * descent_direction,
+                optimize_mode=optimize_mode,
             )
             candidate_report = _evaluate_symmetric_collision_loss_with_context(
                 context=context,

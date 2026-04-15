@@ -10,6 +10,9 @@ from loguru import logger
 
 from collision_resolver.formula_collision import (
     JointOptimizationReport,
+    OPTIMIZE_MODE_6DOF,
+    OPTIMIZE_MODE_ROTATION,
+    OPTIMIZE_MODE_TRANSLATION,
     SymmetricLossReport,
     evaluate_symmetric_collision_loss,
     identity_transform,
@@ -100,6 +103,13 @@ def parse_args() -> argparse.Namespace:
         "--optimize",
         action="store_true",
         help="Enable joint optimization for A/B transforms.",
+    )
+    parser.add_argument(
+        "--optimize-mode",
+        type=str,
+        default=OPTIMIZE_MODE_6DOF,
+        choices=[OPTIMIZE_MODE_TRANSLATION, OPTIMIZE_MODE_ROTATION, OPTIMIZE_MODE_6DOF],
+        help="Optimization mode: translation, rotation, or 6dof.",
     )
     parser.add_argument(
         "--max-opt-iters",
@@ -407,6 +417,7 @@ def run(args: argparse.Namespace) -> None:
             asset_b=mesh_b_asset,
             transform_a_init=transform_a,
             transform_b_init=transform_b,
+            optimize_mode=args.optimize_mode,
             max_iters=args.max_opt_iters,
             grad_eps=args.opt_grad_eps,
             init_step=args.opt_init_step,
@@ -422,7 +433,7 @@ def run(args: argparse.Namespace) -> None:
 
     if args.optimize:
         print_report(
-            title="SYMMETRIC SDF LOSS (BEFORE OPT)",
+            title=f"SYMMETRIC SDF LOSS (BEFORE OPT, MODE={args.optimize_mode.upper()})",
             args=args,
             transform_a=transform_a,
             transform_b=transform_b,
@@ -431,7 +442,7 @@ def run(args: argparse.Namespace) -> None:
         if optimization_report is not None:
             print_optimization_summary(optimization_report)
         print_report(
-            title="SYMMETRIC SDF LOSS (AFTER OPT)",
+            title=f"SYMMETRIC SDF LOSS (AFTER OPT, MODE={args.optimize_mode.upper()})",
             args=args,
             transform_a=optimized_transform_a,
             transform_b=optimized_transform_b,
