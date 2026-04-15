@@ -10,6 +10,7 @@ from loguru import logger
 
 from collision_resolver.preprocess_cache import (
     DEFAULT_CACHE_DIR,
+    SDFVolume,
     create_cached_sdf_query,
     preprocess_mesh_with_cache,
 )
@@ -119,6 +120,25 @@ def parse_args() -> argparse.Namespace:
         help="Safety margin as a ratio of the combined scene bbox diagonal.",
     )
     parser.add_argument(
+        "--penetration-tolerance",
+        type=float,
+        default=None,
+        help=(
+            "Absolute SDF penetration tolerance. "
+            "Collision is reported only when signed distance is less than -tolerance. "
+            "If omitted, the value is auto-derived from cached SDF voxel spacing."
+        ),
+    )
+    parser.add_argument(
+        "--penetration-tolerance-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Penetration tolerance as a ratio of the combined scene bbox diagonal. "
+            "Used only when --penetration-tolerance is not provided."
+        ),
+    )
+    parser.add_argument(
         "--output-resolved-mesh",
         type=str,
         default=None,
@@ -142,6 +162,36 @@ def format_vec(vec: np.ndarray | None) -> str:
     if vec is None:
         return "N/A"
     return f"[{vec[0]:.6f}, {vec[1]:.6f}, {vec[2]:.6f}]"
+
+
+def estimate_sdf_max_voxel_size(volume: SDFVolume) -> float:
+    grid_extent = np.asarray(volume.values.shape, dtype=np.float64) - 1.0
+    spacing = (volume.max_bound - volume.min_bound) / grid_extent
+    return float(np.max(spacing))
+
+
+def resolve_penetration_tolerance(
+    *,
+    scene_scale: float,
+    volume_a: SDFVolume,
+    volume_b: SDFVolume,
+    explicit_tolerance: float | None,
+    tolerance_ratio: float | None,
+) -> float:
+    if explicit_tolerance is not None:
+        if explicit_tolerance < 0.0:
+            raise ValueError("penetration_tolerance must be non-negative.")
+        return float(explicit_tolerance)
+
+    if tolerance_ratio is not None:
+        if tolerance_ratio < 0.0:
+            raise ValueError("penetration_tolerance_ratio must be non-negative.")
+        return float(scene_scale * tolerance_ratio)
+
+    return max(
+        estimate_sdf_max_voxel_size(volume_a),
+        estimate_sdf_max_voxel_size(volume_b),
+    )
 
 
 def print_direction_result(result: DirectionCollisionResult) -> None:
@@ -223,6 +273,7 @@ def print_header(
     offset: np.ndarray,
     collision_before: CollisionReport,
     runtime,
+    penetration_tolerance: float,
 ) -> None:
     print("=" * 72)
     print(f"{'SDF COLLISION DETECTION':^72}")
@@ -238,6 +289,7 @@ def print_header(
     )
     print(f"Gradient epsilon: {runtime.gradient_eps:.6f}")
     print(f"Safety margin: {runtime.safety_margin:.6f}")
+    print(f"Penetration tolerance: {penetration_tolerance:.6f}")
     print(f"Overall collision: {'YES' if collision_before.overall_collision else 'NO'}")
     print(f"Overall max penetration depth: {collision_before.overall_depth:.6f}")
     print(f"Overall bbox min: {format_vec(collision_before.overall_bbox_min)}")
@@ -325,6 +377,13 @@ def run(args: argparse.Namespace) -> None:
         safety_margin=args.safety_margin,
         safety_margin_ratio=args.safety_margin_ratio,
     )
+    penetration_tolerance = resolve_penetration_tolerance(
+        scene_scale=runtime.scene_scale,
+        volume_a=mesh_a_asset.sdf_volume,
+        volume_b=mesh_b_asset.sdf_volume,
+        explicit_tolerance=args.penetration_tolerance,
+        tolerance_ratio=args.penetration_tolerance_ratio,
+    )
 
     mesh_b_before_resolve = copy.deepcopy(mesh_b) if args.resolve_visualize else None
     collision_before = detect_collision(
@@ -334,9 +393,10 @@ def run(args: argparse.Namespace) -> None:
         runtime.sample_count_b,
         sdf_query_a=sdf_query_a,
         sdf_query_b=sdf_query_b_before,
+        penetration_tolerance=penetration_tolerance,
     )
 
-    print_header(args, offset, collision_before, runtime)
+    print_header(args, offset, collision_before, runtime, penetration_tolerance)
     print_direction_result(collision_before.result_b_in_a)
     print_direction_result(collision_before.result_a_in_b)
 
@@ -352,6 +412,7 @@ def run(args: argparse.Namespace) -> None:
             eps=runtime.gradient_eps,
             max_iters=args.max_resolve_iters,
             safety_margin=runtime.safety_margin,
+            penetration_tolerance=penetration_tolerance,
         )
 
         post_translation = offset + resolve_result.total_translation
@@ -367,6 +428,7 @@ def run(args: argparse.Namespace) -> None:
             runtime.sample_count_b,
             sdf_query_a=sdf_query_a,
             sdf_query_b=sdf_query_b_after,
+            penetration_tolerance=penetration_tolerance,
         )
         print_resolve_result(resolve_result, collision_after)
 

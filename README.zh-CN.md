@@ -7,6 +7,7 @@
 ## 功能
 
 - 双向 SDF 碰撞检测（`B in A` 与 `A in B`）
+- 支持穿透容差判定，避免贴合接触被误判为碰撞
 - 穿透深度统计与碰撞包围盒输出
 - 基于梯度方向的迭代平移解碰
 - 对非 watertight 网格先自动修复，再执行 SDF 计算
@@ -69,6 +70,8 @@ uv run collision-resolver <mesh_a> <mesh_b> [options]
 
 运行时，程序会先根据输入网格文件名（不含扩展名）在 `data/sdf_cache` 中查找预处理缓存。若命中缓存，则直接使用缓存中的 watertight 网格与 SDF 数据。
 
+碰撞判定使用穿透容差 `penetration_tolerance`：仅当 `SDF < -penetration_tolerance` 时才认定为穿透。默认情况下，该容差会根据缓存 SDF 体素步长自动推导，从而避免“完全贴合但被浮点与离散化误判为碰撞”的情况。
+
 示例：仅检测
 
 ```bash
@@ -98,10 +101,17 @@ uv run collision-resolver data/a.obj data/b.obj \
 - `--gradient-eps` / `--gradient-eps-ratio`：梯度有限差分步长
 - `--max-resolve-iters`：最大解碰迭代次数
 - `--safety-margin` / `--safety-margin-ratio`：每步平移的安全裕度
+- `--penetration-tolerance` / `--penetration-tolerance-ratio`：穿透容差（未显式设置时按缓存 SDF 体素步长自动推导）
 - `--resolve`：启用平移解碰
 - `--visualize` / `--resolve-visualize`：启用可视化
 - `--sdf-cache-dir`：指定预处理缓存目录，默认值为 `data/sdf_cache`
 - `--rebuild-preprocess-cache`：强制重建输入网格的预处理缓存
+
+如需严格零容差判定，可显式指定：
+
+```bash
+uv run collision-resolver data/a.obj data/b.obj --penetration-tolerance 0.0
+```
 
 ## 代码结构
 

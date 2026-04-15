@@ -215,12 +215,16 @@ def analyze_direction(
     sampled_mesh: o3d.geometry.TriangleMesh,
     sample_count: int,
     label: str,
+    penetration_tolerance: float = 0.0,
 ) -> DirectionCollisionResult:
+    if penetration_tolerance < 0.0:
+        raise ValueError("penetration_tolerance must be non-negative.")
+
     sampled_pcd = sampled_mesh.sample_points_uniformly(number_of_points=sample_count)
     sampled_points = np.asarray(sampled_pcd.points)
 
     sdf_values = sdf_query(sampled_points)
-    penetration_mask = sdf_values < 0.0
+    penetration_mask = sdf_values < -penetration_tolerance
     penetration_points = sampled_points[penetration_mask]
 
     if not np.any(penetration_mask):
@@ -240,7 +244,9 @@ def analyze_direction(
         collision=True,
         penetrating_count=int(np.count_nonzero(penetration_mask)),
         sample_count=sample_count,
-        max_penetration_depth=float(abs(sdf_values.min())),
+        max_penetration_depth=float(
+            np.max(-sdf_values[penetration_mask] - penetration_tolerance),
+        ),
         bbox_min=penetration_points.min(axis=0),
         bbox_max=penetration_points.max(axis=0),
         penetration_points=penetration_points,
@@ -265,7 +271,11 @@ def detect_collision(
     *,
     sdf_query_a: SDFQueryFn | None = None,
     sdf_query_b: SDFQueryFn | None = None,
+    penetration_tolerance: float = 0.0,
 ) -> CollisionReport:
+    if penetration_tolerance < 0.0:
+        raise ValueError("penetration_tolerance must be non-negative.")
+
     if sdf_query_a is None:
         scene_a = build_raycast_scene(mesh_a)
 
@@ -289,12 +299,14 @@ def detect_collision(
         sampled_mesh=mesh_b,
         sample_count=sample_count_b,
         label="Mesh B surface inside Mesh A SDF",
+        penetration_tolerance=penetration_tolerance,
     )
     result_a_in_b = analyze_direction(
         sdf_query=query_b,
         sampled_mesh=mesh_a,
         sample_count=sample_count_a,
         label="Mesh A surface inside Mesh B SDF",
+        penetration_tolerance=penetration_tolerance,
     )
 
     overall_bbox_min, overall_bbox_max = merge_bboxes([result_b_in_a, result_a_in_b])
@@ -315,12 +327,16 @@ def compute_push_contribution(
     eps: float,
     direction_sign: float,
     label: str,
+    penetration_tolerance: float = 0.0,
 ) -> PushContribution:
+    if penetration_tolerance < 0.0:
+        raise ValueError("penetration_tolerance must be non-negative.")
+
     sampled_pcd = sampled_mesh.sample_points_uniformly(number_of_points=sample_count)
     sampled_points = np.asarray(sampled_pcd.points)
 
     sdf_values = query_sdf(scene, sampled_points)
-    penetration_mask = sdf_values < 0.0
+    penetration_mask = sdf_values < -penetration_tolerance
     if not np.any(penetration_mask):
         return PushContribution(
             label=label,
@@ -331,7 +347,7 @@ def compute_push_contribution(
         )
 
     penetration_points = sampled_points[penetration_mask]
-    penetration_depths = -sdf_values[penetration_mask]
+    penetration_depths = -sdf_values[penetration_mask] - penetration_tolerance
     gradients = query_sdf_gradient(scene, penetration_points, eps)
     grad_norms = np.linalg.norm(gradients, axis=1, keepdims=True)
     gradients_unit = gradients / np.clip(grad_norms, 1e-12, None)
@@ -357,6 +373,7 @@ def resolve_collision_by_translation(
     eps: float,
     max_iters: int,
     safety_margin: float,
+    penetration_tolerance: float = 0.0,
 ) -> ResolveReport:
     if eps <= 0.0:
         raise ValueError("gradient epsilon must be positive.")
@@ -364,6 +381,8 @@ def resolve_collision_by_translation(
         raise ValueError("max_iters must be a positive integer.")
     if safety_margin < 0.0:
         raise ValueError("safety_margin must be non-negative.")
+    if penetration_tolerance < 0.0:
+        raise ValueError("penetration_tolerance must be non-negative.")
 
     scene_a = build_raycast_scene(mesh_a)
     total_translation = np.zeros(3, dtype=np.float64)
@@ -379,6 +398,7 @@ def resolve_collision_by_translation(
             eps=eps,
             direction_sign=1.0,
             label="Mesh B surface inside Mesh A SDF",
+            penetration_tolerance=penetration_tolerance,
         )
         contribution_a_in_b = compute_push_contribution(
             scene=scene_b,
@@ -387,6 +407,7 @@ def resolve_collision_by_translation(
             eps=eps,
             direction_sign=-1.0,
             label="Mesh A surface inside Mesh B SDF",
+            penetration_tolerance=penetration_tolerance,
         )
 
         if not contribution_b_in_a.collision and not contribution_a_in_b.collision:
