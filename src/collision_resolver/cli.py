@@ -8,152 +8,156 @@ import numpy as np
 import open3d as o3d
 from loguru import logger
 
-from collision_resolver.preprocess_cache import (
-    DEFAULT_CACHE_DIR,
-    SDFVolume,
-    create_cached_sdf_query,
-    preprocess_mesh_with_cache,
+from collision_resolver.formula_collision import (
+    JointOptimizationReport,
+    SymmetricLossReport,
+    evaluate_symmetric_collision_loss,
+    identity_transform,
+    optimize_joint_transforms,
+    validate_transform_matrix,
 )
-from collision_resolver.sdf_collision import (
-    CollisionReport,
-    DirectionCollisionResult,
-    ResolveReport,
-    detect_collision,
-    resolve_collision_by_translation,
-    resolve_runtime_parameters,
-)
+from collision_resolver.preprocess_cache import DEFAULT_CACHE_DIR, preprocess_mesh_with_cache
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Use SDF to detect collision between two triangle meshes.",
-    )
-    parser.add_argument("mesh_a", help="Path of the first mesh file.")
-    parser.add_argument("mesh_b", help="Path of the second mesh file.")
-    parser.add_argument(
-        "--offset",
-        nargs=3,
-        type=float,
-        default=(0.0, 0.0, 0.0),
-        metavar=("DX", "DY", "DZ"),
-        help="Optional translation applied to the second mesh.",
-    )
-    parser.add_argument(
-        "--samples",
-        type=int,
-        default=None,
-        help=(
-            "Explicit override for the number of surface samples used for each direction. "
-            "If omitted, the count is derived from --sample-spacing-ratio."
+        description=(
+            "Compute symmetric SDF collision loss with offline SDF and offline surface point clouds."
         ),
     )
+    parser.add_argument("mesh_a", help="Path of mesh A.")
+    parser.add_argument("mesh_b", help="Path of mesh B.")
     parser.add_argument(
-        "--sample-spacing-ratio",
-        type=float,
-        default=5e-3,
-        help=(
-            "Target surface sampling spacing as a ratio of the combined scene bbox diagonal. "
-            "Used to derive per-mesh sample counts when --samples is omitted."
-        ),
-    )
-    parser.add_argument(
-        "--min-samples",
-        type=int,
-        default=5000,
-        help="Lower bound for the auto-derived per-mesh sample count.",
-    )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=200000,
-        help="Upper bound for the auto-derived per-mesh sample count.",
-    )
-    parser.add_argument(
-        "--visualize",
-        action="store_true",
-        help="Visualize the meshes, SDF penetration points, and collision bbox.",
-    )
-    parser.add_argument(
-        "--resolve",
-        action="store_true",
-        help="Automatically translate mesh B along the SDF-gradient push direction.",
-    )
-    parser.add_argument(
-        "--resolve-visualize",
-        action="store_true",
-        help="When resolving, visualize both the pre-resolve and post-resolve states.",
-    )
-    parser.add_argument(
-        "--gradient-eps",
+        "--transform-a",
+        nargs=16,
         type=float,
         default=None,
+        metavar="Aij",
         help=(
-            "Explicit finite-difference epsilon used to estimate the SDF gradient. "
-            "If omitted, derived from --gradient-eps-ratio."
+            "Row-major 4x4 transform matrix of mesh A (16 values). "
+            "If omitted, identity transform is used."
         ),
     )
     parser.add_argument(
-        "--gradient-eps-ratio",
-        type=float,
-        default=1e-4,
-        help="Gradient epsilon as a ratio of the combined scene bbox diagonal.",
-    )
-    parser.add_argument(
-        "--max-resolve-iters",
-        type=int,
-        default=20,
-        help="Maximum number of translation iterations for collision resolution.",
-    )
-    parser.add_argument(
-        "--safety-margin",
+        "--transform-b",
+        nargs=16,
         type=float,
         default=None,
+        metavar="Bij",
         help=(
-            "Explicit extra translation distance added on top of the current penetration depth. "
-            "If omitted, derived from --safety-margin-ratio."
+            "Row-major 4x4 transform matrix of mesh B (16 values). "
+            "If omitted, identity transform is used."
         ),
     )
     parser.add_argument(
-        "--safety-margin-ratio",
-        type=float,
-        default=1e-5,
-        help="Safety margin as a ratio of the combined scene bbox diagonal.",
-    )
-    parser.add_argument(
-        "--penetration-tolerance",
-        type=float,
-        default=None,
-        help=(
-            "Absolute SDF penetration tolerance. "
-            "Collision is reported only when signed distance is less than -tolerance. "
-            "If omitted, the value is auto-derived from cached SDF voxel spacing."
-        ),
-    )
-    parser.add_argument(
-        "--penetration-tolerance-ratio",
-        type=float,
-        default=None,
-        help=(
-            "Penetration tolerance as a ratio of the combined scene bbox diagonal. "
-            "Used only when --penetration-tolerance is not provided."
-        ),
-    )
-    parser.add_argument(
-        "--output-resolved-mesh",
+        "--transform-a-file",
         type=str,
         default=None,
-        help="Write the resolved mesh B to this path after --resolve finishes.",
+        help="Optional path to a 4x4 transform file for mesh A (.npy or text).",
+    )
+    parser.add_argument(
+        "--transform-b-file",
+        type=str,
+        default=None,
+        help="Optional path to a 4x4 transform file for mesh B (.npy or text).",
     )
     parser.add_argument(
         "--sdf-cache-dir",
         type=str,
         default=str(DEFAULT_CACHE_DIR),
-        help="Directory for preprocessed watertight mesh and SDF cache.",
+        help="Directory for preprocessed watertight mesh, SDF cache, and offline surface points.",
     )
     parser.add_argument(
         "--rebuild-preprocess-cache",
         action="store_true",
-        help="Force rebuilding mesh preprocess cache even if cache already exists.",
+        help="Force rebuilding preprocess cache even if cache already exists.",
+    )
+    parser.add_argument(
+        "--surface-point-count",
+        type=int,
+        default=20_000,
+        help="Offline surface point count stored in preprocess cache for each mesh.",
+    )
+    parser.add_argument(
+        "--voxel-size-ratio",
+        type=float,
+        default=1e-2,
+        help="SDF voxel size ratio against mesh bbox diagonal.",
+    )
+    parser.add_argument(
+        "--padding-ratio",
+        type=float,
+        default=5e-2,
+        help="SDF bbox padding ratio against mesh bbox diagonal.",
+    )
+    parser.add_argument(
+        "--max-grid-dim",
+        type=int,
+        default=160,
+        help="Upper bound of SDF grid resolution per axis.",
+    )
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Enable joint optimization for A/B transforms.",
+    )
+    parser.add_argument(
+        "--max-opt-iters",
+        type=int,
+        default=30,
+        help="Maximum number of iterations for joint optimization.",
+    )
+    parser.add_argument(
+        "--opt-grad-eps",
+        type=float,
+        default=1e-4,
+        help="Central-difference epsilon for optimization gradient.",
+    )
+    parser.add_argument(
+        "--opt-init-step",
+        type=float,
+        default=1.0,
+        help="Initial line-search step size for optimization.",
+    )
+    parser.add_argument(
+        "--opt-backtrack-factor",
+        type=float,
+        default=0.5,
+        help="Backtracking factor in optimization line search.",
+    )
+    parser.add_argument(
+        "--opt-armijo-c",
+        type=float,
+        default=1e-4,
+        help="Armijo condition coefficient in optimization line search.",
+    )
+    parser.add_argument(
+        "--opt-grad-tol",
+        type=float,
+        default=1e-6,
+        help="Gradient norm tolerance for optimization convergence.",
+    )
+    parser.add_argument(
+        "--opt-loss-tol",
+        type=float,
+        default=1e-10,
+        help="Loss tolerance for optimization convergence.",
+    )
+    parser.add_argument(
+        "--opt-min-step",
+        type=float,
+        default=1e-8,
+        help="Minimum line-search step size before optimization is considered failed.",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Visualize the current/final transformed meshes and penetration points.",
+    )
+    parser.add_argument(
+        "--optimize-visualize",
+        action="store_true",
+        help="When optimizing, visualize both before and after optimization states.",
     )
     return parser.parse_args()
 
@@ -164,43 +168,101 @@ def format_vec(vec: np.ndarray | None) -> str:
     return f"[{vec[0]:.6f}, {vec[1]:.6f}, {vec[2]:.6f}]"
 
 
-def estimate_sdf_max_voxel_size(volume: SDFVolume) -> float:
-    grid_extent = np.asarray(volume.values.shape, dtype=np.float64) - 1.0
-    spacing = (volume.max_bound - volume.min_bound) / grid_extent
-    return float(np.max(spacing))
+def _matrix_from_flat(values: list[float], label: str) -> np.ndarray:
+    matrix = np.asarray(values, dtype=np.float64).reshape(4, 4)
+    return validate_transform_matrix(matrix, label)
 
 
-def resolve_penetration_tolerance(
+def _matrix_from_file(path: str | Path, label: str) -> np.ndarray:
+    path_obj = Path(path)
+    if not path_obj.is_file():
+        raise FileNotFoundError(f"{label} file does not exist: {path_obj}")
+
+    if path_obj.suffix.lower() == ".npy":
+        loaded = np.load(path_obj)
+    else:
+        loaded = np.loadtxt(path_obj, dtype=np.float64)
+
+    matrix = np.asarray(loaded, dtype=np.float64)
+    if matrix.shape != (4, 4):
+        if matrix.size != 16:
+            raise ValueError(f"{label} from file must contain exactly 16 values.")
+        matrix = matrix.reshape(4, 4)
+
+    return validate_transform_matrix(matrix, label)
+
+
+def resolve_transform(
     *,
-    scene_scale: float,
-    volume_a: SDFVolume,
-    volume_b: SDFVolume,
-    explicit_tolerance: float | None,
-    tolerance_ratio: float | None,
-) -> float:
-    if explicit_tolerance is not None:
-        if explicit_tolerance < 0.0:
-            raise ValueError("penetration_tolerance must be non-negative.")
-        return float(explicit_tolerance)
-
-    if tolerance_ratio is not None:
-        if tolerance_ratio < 0.0:
-            raise ValueError("penetration_tolerance_ratio must be non-negative.")
-        return float(scene_scale * tolerance_ratio)
-
-    return max(
-        estimate_sdf_max_voxel_size(volume_a),
-        estimate_sdf_max_voxel_size(volume_b),
-    )
+    flat_values: list[float] | None,
+    file_path: str | None,
+    label: str,
+) -> np.ndarray:
+    if flat_values is not None and file_path is not None:
+        raise ValueError(f"{label} supports either inline values or file input, not both.")
+    if flat_values is not None:
+        return _matrix_from_flat(flat_values, label)
+    if file_path is not None:
+        return _matrix_from_file(file_path, label)
+    return identity_transform()
 
 
-def print_direction_result(result: DirectionCollisionResult) -> None:
-    print(f"\n[{result.label}]")
-    print(f"Collision: {'YES' if result.collision else 'NO'}")
-    print(f"Penetrating samples: {result.penetrating_count} / {result.sample_count}")
-    print(f"Max penetration depth: {result.max_penetration_depth:.6f}")
-    print(f"BBox min: {format_vec(result.bbox_min)}")
-    print(f"BBox max: {format_vec(result.bbox_max)}")
+def _print_matrix(name: str, matrix: np.ndarray) -> None:
+    print(f"{name}:")
+    for row in matrix:
+        print(f"  [{row[0]: .6f}, {row[1]: .6f}, {row[2]: .6f}, {row[3]: .6f}]")
+
+
+def print_report(
+    *,
+    title: str,
+    args: argparse.Namespace,
+    transform_a: np.ndarray,
+    transform_b: np.ndarray,
+    report: SymmetricLossReport,
+) -> None:
+    print("=" * 72)
+    print(f"{title:^72}")
+    print("=" * 72)
+    print(f"Mesh A: {Path(args.mesh_a)}")
+    print(f"Mesh B: {Path(args.mesh_b)}")
+    print(f"Surface samples (offline): {args.surface_point_count}")
+    _print_matrix("Transform A", transform_a)
+    _print_matrix("Transform B", transform_b)
+
+    print("\n[B -> A]")
+    print(f"Samples: {report.result_b_to_a.sample_count}")
+    print(f"Penetrating samples: {report.result_b_to_a.penetrating_count}")
+    print(f"Max penetration depth: {report.result_b_to_a.max_penetration_depth:.6f}")
+    print(f"Loss_B_to_A: {report.result_b_to_a.loss:.10f}")
+    print(f"BBox min: {format_vec(report.result_b_to_a.bbox_min)}")
+    print(f"BBox max: {format_vec(report.result_b_to_a.bbox_max)}")
+
+    print("\n[A -> B]")
+    print(f"Samples: {report.result_a_to_b.sample_count}")
+    print(f"Penetrating samples: {report.result_a_to_b.penetrating_count}")
+    print(f"Max penetration depth: {report.result_a_to_b.max_penetration_depth:.6f}")
+    print(f"Loss_A_to_B: {report.result_a_to_b.loss:.10f}")
+    print(f"BBox min: {format_vec(report.result_a_to_b.bbox_min)}")
+    print(f"BBox max: {format_vec(report.result_a_to_b.bbox_max)}")
+
+    print("\n[Overall]")
+    print(f"Collision: {'YES' if report.overall_collision else 'NO'}")
+    print(f"Max penetration depth: {report.overall_depth:.6f}")
+    print(f"Loss_total: {report.total_loss:.10f}")
+    print(f"BBox min: {format_vec(report.overall_bbox_min)}")
+    print(f"BBox max: {format_vec(report.overall_bbox_max)}")
+    print("=" * 72)
+
+
+def print_optimization_summary(report: JointOptimizationReport) -> None:
+    print("\n[Joint Optimization]")
+    print(f"Success: {'YES' if report.success else 'NO'}")
+    print(f"Stop reason: {report.stop_reason}")
+    print(f"Iterations: {report.iterations}")
+    print(f"Initial loss: {report.initial_loss:.10f}")
+    print(f"Final loss: {report.final_loss:.10f}")
+    print(f"Loss history length: {len(report.loss_history)}")
 
 
 def o3d_mesh_to_pv(mesh: o3d.geometry.TriangleMesh, pv_module):
@@ -212,13 +274,23 @@ def o3d_mesh_to_pv(mesh: o3d.geometry.TriangleMesh, pv_module):
     return pv_module.PolyData(vertices, faces)
 
 
-def visualize_collision(
-    mesh_a: o3d.geometry.TriangleMesh,
-    mesh_b: o3d.geometry.TriangleMesh,
-    bbox_min: np.ndarray | None,
-    bbox_max: np.ndarray | None,
-    results: list[DirectionCollisionResult],
-    title: str = "SDF Collision Visualization",
+def transformed_mesh(
+    mesh: o3d.geometry.TriangleMesh,
+    transform: np.ndarray,
+) -> o3d.geometry.TriangleMesh:
+    mesh_copy = copy.deepcopy(mesh)
+    mesh_copy.transform(np.asarray(transform, dtype=np.float64))
+    return mesh_copy
+
+
+def visualize_report(
+    *,
+    mesh_a_local: o3d.geometry.TriangleMesh,
+    mesh_b_local: o3d.geometry.TriangleMesh,
+    transform_a: np.ndarray,
+    transform_b: np.ndarray,
+    report: SymmetricLossReport,
+    title: str,
 ) -> None:
     try:
         import pyvista as pv
@@ -227,33 +299,42 @@ def visualize_collision(
             "Visualization requires pyvista. Install optional dependency first.",
         ) from exc
 
+    mesh_a_world = transformed_mesh(mesh_a_local, transform_a)
+    mesh_b_world = transformed_mesh(mesh_b_local, transform_b)
+
     plotter = pv.Plotter(title=title)
+    plotter.add_mesh(o3d_mesh_to_pv(mesh_a_world, pv), color="cyan", opacity=0.22, label="Mesh A")
+    plotter.add_mesh(o3d_mesh_to_pv(mesh_b_world, pv), color="magenta", opacity=0.22, label="Mesh B")
 
-    mesh_a_pv = o3d_mesh_to_pv(mesh_a, pv)
-    mesh_b_pv = o3d_mesh_to_pv(mesh_b, pv)
-    plotter.add_mesh(mesh_a_pv, color="cyan", opacity=0.2, label="Mesh A")
-    plotter.add_mesh(mesh_b_pv, color="magenta", opacity=0.2, label="Mesh B")
-
-    all_points = [r.penetration_points for r in results if len(r.penetration_points) > 0]
-    if all_points:
-        merged_points = np.vstack(all_points)
+    points_b_to_a = report.result_b_to_a.penetration_points_world
+    if len(points_b_to_a) > 0:
         plotter.add_points(
-            merged_points,
+            points_b_to_a,
             color="yellow",
             point_size=4,
             render_points_as_spheres=True,
-            label="SDF Penetration Points",
+            label="B->A Penetration",
         )
 
-    if bbox_min is not None and bbox_max is not None:
+    points_a_to_b = report.result_a_to_b.penetration_points_world
+    if len(points_a_to_b) > 0:
+        plotter.add_points(
+            points_a_to_b,
+            color="orange",
+            point_size=4,
+            render_points_as_spheres=True,
+            label="A->B Penetration",
+        )
+
+    if report.overall_bbox_min is not None and report.overall_bbox_max is not None:
         bbox_mesh = pv.Box(
             [
-                bbox_min[0],
-                bbox_max[0],
-                bbox_min[1],
-                bbox_max[1],
-                bbox_min[2],
-                bbox_max[2],
+                report.overall_bbox_min[0],
+                report.overall_bbox_max[0],
+                report.overall_bbox_min[1],
+                report.overall_bbox_max[1],
+                report.overall_bbox_min[2],
+                report.overall_bbox_max[2],
             ],
         )
         plotter.add_mesh(
@@ -261,85 +342,46 @@ def visualize_collision(
             color="lime",
             style="wireframe",
             line_width=6,
-            label="BBox",
+            label="Collision BBox",
         )
 
     plotter.add_legend()
     plotter.show()
 
 
-def print_header(
-    args: argparse.Namespace,
-    offset: np.ndarray,
-    collision_before: CollisionReport,
-    runtime,
-    penetration_tolerance: float,
-) -> None:
-    print("=" * 72)
-    print(f"{'SDF COLLISION DETECTION':^72}")
-    print("=" * 72)
-    print(f"Mesh A: {Path(args.mesh_a)}")
-    print(f"Mesh B: {Path(args.mesh_b)}")
-    print(f"Mesh B offset: [{offset[0]:.6f}, {offset[1]:.6f}, {offset[2]:.6f}]")
-    print(f"Scene bbox diagonal: {runtime.scene_scale:.6f}")
-    print(f"Target sample spacing: {runtime.target_spacing:.6f}")
-    print(
-        "Samples per direction: "
-        f"A={runtime.sample_count_a}, B={runtime.sample_count_b}",
-    )
-    print(f"Gradient epsilon: {runtime.gradient_eps:.6f}")
-    print(f"Safety margin: {runtime.safety_margin:.6f}")
-    print(f"Penetration tolerance: {penetration_tolerance:.6f}")
-    print(f"Overall collision: {'YES' if collision_before.overall_collision else 'NO'}")
-    print(f"Overall max penetration depth: {collision_before.overall_depth:.6f}")
-    print(f"Overall bbox min: {format_vec(collision_before.overall_bbox_min)}")
-    print(f"Overall bbox max: {format_vec(collision_before.overall_bbox_max)}")
-
-
-def print_resolve_result(
-    resolve_result: ResolveReport,
-    collision_after: CollisionReport,
-) -> None:
-    resolved_by_post_check = resolve_result.resolved and not collision_after.overall_collision
-
-    print("\n[Collision Resolution]")
-    print(f"Resolved: {'YES' if resolved_by_post_check else 'NO'}")
-    print(f"Iterations: {resolve_result.iterations}")
-    print(
-        "Initial push direction: "
-        f"{format_vec(resolve_result.first_direction) if resolve_result.first_direction is not None else 'N/A'}",
-    )
-    print(
-        "Initial suggested translation: "
-        f"{format_vec(resolve_result.first_step) if resolve_result.first_step is not None else 'N/A'}",
-    )
-    print(f"Total translation applied: {format_vec(resolve_result.total_translation)}")
-    print(f"Post-resolve collision: {'YES' if collision_after.overall_collision else 'NO'}")
-    print(f"Post-resolve max penetration depth: {collision_after.overall_depth:.6f}")
-
-    if resolve_result.resolved and not resolved_by_post_check:
-        logger.warning(
-            "Resolver converged but post-check still reports collision. "
-            "Consider increasing --samples or --max-resolve-iters.",
-        )
-
-
 def run(args: argparse.Namespace) -> None:
-    if args.resolve_visualize:
-        args.resolve = True
-    if args.output_resolved_mesh is not None:
-        args.resolve = True
+    if args.optimize_visualize:
+        args.optimize = True
+
+    transform_a = resolve_transform(
+        flat_values=args.transform_a,
+        file_path=args.transform_a_file,
+        label="transform_a",
+    )
+    transform_b = resolve_transform(
+        flat_values=args.transform_b,
+        file_path=args.transform_b_file,
+        label="transform_b",
+    )
 
     cache_root = Path(args.sdf_cache_dir)
     mesh_a_asset = preprocess_mesh_with_cache(
         args.mesh_a,
         cache_root=cache_root,
         force_rebuild=args.rebuild_preprocess_cache,
+        voxel_size_ratio=args.voxel_size_ratio,
+        padding_ratio=args.padding_ratio,
+        max_grid_dim=args.max_grid_dim,
+        surface_point_count=args.surface_point_count,
     )
     mesh_b_asset = preprocess_mesh_with_cache(
         args.mesh_b,
         cache_root=cache_root,
         force_rebuild=args.rebuild_preprocess_cache,
+        voxel_size_ratio=args.voxel_size_ratio,
+        padding_ratio=args.padding_ratio,
+        max_grid_dim=args.max_grid_dim,
+        surface_point_count=args.surface_point_count,
     )
     logger.info(
         "Preprocess cache: mesh_a={}, mesh_b={}",
@@ -347,125 +389,99 @@ def run(args: argparse.Namespace) -> None:
         "hit" if mesh_b_asset.cache_hit else "build",
     )
 
-    mesh_a = copy.deepcopy(mesh_a_asset.mesh)
-    mesh_b = copy.deepcopy(mesh_b_asset.mesh)
-
-    offset = np.asarray(args.offset, dtype=float)
-    if np.any(offset != 0.0):
-        logger.info("Applying translation to mesh B: {}", offset.tolist())
-        mesh_b.translate(offset)
-
-    sdf_query_a = create_cached_sdf_query(
-        mesh_a_asset.sdf_volume,
-        mesh_a_asset.mesh,
-    )
-    sdf_query_b_before = create_cached_sdf_query(
-        mesh_b_asset.sdf_volume,
-        mesh_b_asset.mesh,
-        translation=offset,
+    initial_report = evaluate_symmetric_collision_loss(
+        asset_a=mesh_a_asset,
+        asset_b=mesh_b_asset,
+        transform_a=transform_a,
+        transform_b=transform_b,
     )
 
-    runtime = resolve_runtime_parameters(
-        mesh_a,
-        mesh_b,
-        samples=args.samples,
-        sample_spacing_ratio=args.sample_spacing_ratio,
-        min_samples=args.min_samples,
-        max_samples=args.max_samples,
-        gradient_eps=args.gradient_eps,
-        gradient_eps_ratio=args.gradient_eps_ratio,
-        safety_margin=args.safety_margin,
-        safety_margin_ratio=args.safety_margin_ratio,
-    )
-    penetration_tolerance = resolve_penetration_tolerance(
-        scene_scale=runtime.scene_scale,
-        volume_a=mesh_a_asset.sdf_volume,
-        volume_b=mesh_b_asset.sdf_volume,
-        explicit_tolerance=args.penetration_tolerance,
-        tolerance_ratio=args.penetration_tolerance_ratio,
-    )
+    optimized_transform_a = transform_a
+    optimized_transform_b = transform_b
+    final_report = initial_report
+    optimization_report: JointOptimizationReport | None = None
 
-    mesh_b_before_resolve = copy.deepcopy(mesh_b) if args.resolve_visualize else None
-    collision_before = detect_collision(
-        mesh_a,
-        mesh_b,
-        runtime.sample_count_a,
-        runtime.sample_count_b,
-        sdf_query_a=sdf_query_a,
-        sdf_query_b=sdf_query_b_before,
-        penetration_tolerance=penetration_tolerance,
-    )
+    if args.optimize:
+        optimization_report = optimize_joint_transforms(
+            asset_a=mesh_a_asset,
+            asset_b=mesh_b_asset,
+            transform_a_init=transform_a,
+            transform_b_init=transform_b,
+            max_iters=args.max_opt_iters,
+            grad_eps=args.opt_grad_eps,
+            init_step=args.opt_init_step,
+            backtrack_factor=args.opt_backtrack_factor,
+            armijo_c=args.opt_armijo_c,
+            grad_tol=args.opt_grad_tol,
+            loss_tol=args.opt_loss_tol,
+            min_step=args.opt_min_step,
+        )
+        optimized_transform_a = optimization_report.transform_a_optimized
+        optimized_transform_b = optimization_report.transform_b_optimized
+        final_report = optimization_report.final_report
 
-    print_header(args, offset, collision_before, runtime, penetration_tolerance)
-    print_direction_result(collision_before.result_b_in_a)
-    print_direction_result(collision_before.result_a_in_b)
-
-    collision_after = collision_before
-    resolve_result = None
-
-    if args.resolve:
-        resolve_result = resolve_collision_by_translation(
-            mesh_a=mesh_a,
-            mesh_b=mesh_b,
-            sample_count_a=runtime.sample_count_a,
-            sample_count_b=runtime.sample_count_b,
-            eps=runtime.gradient_eps,
-            max_iters=args.max_resolve_iters,
-            safety_margin=runtime.safety_margin,
-            penetration_tolerance=penetration_tolerance,
+    if args.optimize:
+        print_report(
+            title="SYMMETRIC SDF LOSS (BEFORE OPT)",
+            args=args,
+            transform_a=transform_a,
+            transform_b=transform_b,
+            report=initial_report,
+        )
+        if optimization_report is not None:
+            print_optimization_summary(optimization_report)
+        print_report(
+            title="SYMMETRIC SDF LOSS (AFTER OPT)",
+            args=args,
+            transform_a=optimized_transform_a,
+            transform_b=optimized_transform_b,
+            report=final_report,
+        )
+    else:
+        print_report(
+            title="SYMMETRIC SDF COLLISION LOSS",
+            args=args,
+            transform_a=transform_a,
+            transform_b=transform_b,
+            report=initial_report,
         )
 
-        post_translation = offset + resolve_result.total_translation
-        sdf_query_b_after = create_cached_sdf_query(
-            mesh_b_asset.sdf_volume,
-            mesh_b_asset.mesh,
-            translation=post_translation,
+    if args.optimize_visualize:
+        visualize_report(
+            mesh_a_local=mesh_a_asset.mesh,
+            mesh_b_local=mesh_b_asset.mesh,
+            transform_a=transform_a,
+            transform_b=transform_b,
+            report=initial_report,
+            title="Symmetric SDF Visualization - Before Optimization",
         )
-        collision_after = detect_collision(
-            mesh_a,
-            mesh_b,
-            runtime.sample_count_a,
-            runtime.sample_count_b,
-            sdf_query_a=sdf_query_a,
-            sdf_query_b=sdf_query_b_after,
-            penetration_tolerance=penetration_tolerance,
-        )
-        print_resolve_result(resolve_result, collision_after)
-
-        if args.output_resolved_mesh is not None:
-            output_path = Path(args.output_resolved_mesh)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            success = o3d.io.write_triangle_mesh(str(output_path), mesh_b)
-            if not success:
-                raise RuntimeError(f"Failed to write resolved mesh: {output_path}")
-            print(f"Resolved mesh written to: {output_path}")
-
-    print("=" * 72)
-
-    if args.resolve_visualize and mesh_b_before_resolve is not None:
-        visualize_collision(
-            mesh_a=mesh_a,
-            mesh_b=mesh_b_before_resolve,
-            bbox_min=collision_before.overall_bbox_min,
-            bbox_max=collision_before.overall_bbox_max,
-            results=[collision_before.result_b_in_a, collision_before.result_a_in_b],
-            title="SDF Collision Visualization - Before Resolve",
-        )
-        visualize_collision(
-            mesh_a=mesh_a,
-            mesh_b=mesh_b,
-            bbox_min=collision_after.overall_bbox_min,
-            bbox_max=collision_after.overall_bbox_max,
-            results=[collision_after.result_b_in_a, collision_after.result_a_in_b],
-            title="SDF Collision Visualization - After Resolve",
+        visualize_report(
+            mesh_a_local=mesh_a_asset.mesh,
+            mesh_b_local=mesh_b_asset.mesh,
+            transform_a=optimized_transform_a,
+            transform_b=optimized_transform_b,
+            report=final_report,
+            title="Symmetric SDF Visualization - After Optimization",
         )
     elif args.visualize:
-        visualize_collision(
-            mesh_a=mesh_a,
-            mesh_b=mesh_b,
-            bbox_min=collision_after.overall_bbox_min,
-            bbox_max=collision_after.overall_bbox_max,
-            results=[collision_after.result_b_in_a, collision_after.result_a_in_b],
+        visualize_report(
+            mesh_a_local=mesh_a_asset.mesh,
+            mesh_b_local=mesh_b_asset.mesh,
+            transform_a=optimized_transform_a,
+            transform_b=optimized_transform_b,
+            report=final_report,
+            title="Symmetric SDF Visualization",
+        )
+
+    if args.optimize:
+        print("\n[Optimized Transforms]")
+        _print_matrix("Transform A (optimized)", optimized_transform_a)
+        _print_matrix("Transform B (optimized)", optimized_transform_b)
+
+    if args.optimize and optimization_report is not None and not optimization_report.success:
+        logger.warning(
+            "Joint optimization ended without convergence. stop_reason={}",
+            optimization_report.stop_reason,
         )
 
 

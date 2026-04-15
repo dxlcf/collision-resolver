@@ -15,6 +15,16 @@ from .preprocess_cache import (
     create_cached_sdf_query,
     preprocess_mesh_with_cache,
 )
+from .formula_collision import (
+    DirectionLossResult,
+    JointOptimizationReport,
+    SymmetricLossReport,
+    evaluate_symmetric_collision_loss,
+    identity_transform,
+    optimize_joint_transforms,
+    se3_delta_matrix,
+    validate_transform_matrix,
+)
 
 __all__ = [
     "CollisionReport",
@@ -30,4 +40,12 @@ __all__ = [
     "SDFVolume",
     "create_cached_sdf_query",
     "preprocess_mesh_with_cache",
+    "DirectionLossResult",
+    "JointOptimizationReport",
+    "SymmetricLossReport",
+    "evaluate_symmetric_collision_loss",
+    "identity_transform",
+    "optimize_joint_transforms",
+    "se3_delta_matrix",
+    "validate_transform_matrix",
 ]

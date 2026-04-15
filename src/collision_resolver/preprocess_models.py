@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         default=160,
         help="Upper bound of SDF volume grid resolution per axis.",
     )
+    parser.add_argument(
+        "--surface-point-count",
+        type=int,
+        default=20_000,
+        help="Offline surface point count saved to preprocess cache for each mesh.",
+    )
     return parser.parse_args()
 
 
@@ -88,6 +94,7 @@ def run(args: argparse.Namespace) -> int:
                 voxel_size_ratio=args.voxel_size_ratio,
                 padding_ratio=args.padding_ratio,
                 max_grid_dim=args.max_grid_dim,
+                surface_point_count=args.surface_point_count,
             )
         except WatertightRepairError as exc:
             watertight_failures.append((mesh_path, str(exc)))

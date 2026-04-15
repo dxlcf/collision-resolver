@@ -45,6 +45,7 @@ class CachePaths:
     cache_dir: Path
     mesh_path: Path
     sdf_path: Path
+    surface_points_path: Path
     meta_path: Path
 
 
@@ -55,6 +56,7 @@ class PreprocessedMeshAsset:
     cache_paths: CachePaths
     mesh: o3d.geometry.TriangleMesh
     sdf_volume: SDFVolume
+    surface_points: np.ndarray
     cache_hit: bool
     was_watertight: bool
     repair_applied: bool
@@ -78,6 +80,7 @@ def build_cache_paths(cache_root: str | Path, mesh_path: str | Path) -> CachePat
         cache_dir=cache_dir,
         mesh_path=cache_dir / "mesh_watertight.ply",
         sdf_path=cache_dir / "sdf_volume.npz",
+        surface_points_path=cache_dir / "surface_points.npy",
         meta_path=cache_dir / "meta.json",
     )
 
@@ -211,6 +214,35 @@ def load_sdf_volume(path: str | Path) -> SDFVolume:
     )
 
 
+def build_surface_points(
+    mesh: o3d.geometry.TriangleMesh,
+    *,
+    point_count: int,
+) -> np.ndarray:
+    if point_count <= 0:
+        raise ValueError("surface point_count must be a positive integer.")
+
+    sampled_pcd = mesh.sample_points_uniformly(number_of_points=point_count)
+    points = np.asarray(sampled_pcd.points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("Sampled surface points must be shaped as (N, 3).")
+    return points
+
+
+def save_surface_points(points: np.ndarray, path: str | Path) -> None:
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path_obj, np.asarray(points, dtype=np.float32))
+
+
+def load_surface_points(path: str | Path) -> np.ndarray:
+    path_obj = Path(path)
+    points = np.asarray(np.load(path_obj), dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("Cached surface points must be shaped as (N, 3).")
+    return points
+
+
 def _trilinear_interpolate(values: np.ndarray, index_points: np.ndarray) -> np.ndarray:
     shape = np.array(values.shape, dtype=np.int32)
     lower = np.floor(index_points).astype(np.int32)
@@ -312,6 +344,7 @@ def _cache_files_exist(cache_paths: CachePaths) -> bool:
     return (
         cache_paths.mesh_path.is_file()
         and cache_paths.sdf_path.is_file()
+        and cache_paths.surface_points_path.is_file()
         and cache_paths.meta_path.is_file()
     )
 
@@ -344,16 +377,28 @@ def preprocess_mesh_with_cache(
     voxel_size_ratio: float = 1e-2,
     padding_ratio: float = 5e-2,
     max_grid_dim: int = 160,
+    surface_point_count: int = 20_000,
 ) -> PreprocessedMeshAsset:
+    if surface_point_count <= 0:
+        raise ValueError("surface_point_count must be a positive integer.")
+
     source_path = Path(mesh_path)
     cache_key = mesh_name_to_cache_key(source_path)
     cache_paths = build_cache_paths(cache_root, source_path)
 
     if prefer_cache and not force_rebuild and _cache_files_exist(cache_paths):
         try:
+            meta = _load_cache_meta(cache_paths.meta_path)
+            cached_surface_point_count = int(meta.get("surface_point_count", -1))
+            if cached_surface_point_count != surface_point_count:
+                raise ValueError(
+                    "Cached surface_point_count does not match request "
+                    f"({cached_surface_point_count} != {surface_point_count})."
+                )
+
             mesh = _load_cached_mesh(cache_paths.mesh_path)
             sdf_volume = load_sdf_volume(cache_paths.sdf_path)
-            meta = _load_cache_meta(cache_paths.meta_path)
+            surface_points = load_surface_points(cache_paths.surface_points_path)
             logger.info("Preprocess cache hit: {} -> {}", source_path.name, cache_paths.cache_dir)
             return PreprocessedMeshAsset(
                 source_path=source_path,
@@ -361,6 +406,7 @@ def preprocess_mesh_with_cache(
                 cache_paths=cache_paths,
                 mesh=mesh,
                 sdf_volume=sdf_volume,
+                surface_points=surface_points,
                 cache_hit=True,
                 was_watertight=bool(meta.get("was_watertight", True)),
                 repair_applied=bool(meta.get("repair_applied", False)),
@@ -383,12 +429,14 @@ def preprocess_mesh_with_cache(
         padding_ratio=padding_ratio,
         max_grid_dim=max_grid_dim,
     )
+    surface_points = build_surface_points(mesh, point_count=surface_point_count)
 
     cache_paths.cache_dir.mkdir(parents=True, exist_ok=True)
     success = o3d.io.write_triangle_mesh(str(cache_paths.mesh_path), mesh)
     if not success:
         raise RuntimeError(f"Failed to write cached watertight mesh: {cache_paths.mesh_path}")
     save_sdf_volume(sdf_volume, cache_paths.sdf_path)
+    save_surface_points(surface_points, cache_paths.surface_points_path)
     _save_cache_meta(
         cache_paths.meta_path,
         {
@@ -402,6 +450,7 @@ def preprocess_mesh_with_cache(
             "voxel_size_ratio": voxel_size_ratio,
             "padding_ratio": padding_ratio,
             "max_grid_dim": max_grid_dim,
+            "surface_point_count": int(surface_point_count),
         },
     )
 
@@ -412,6 +461,7 @@ def preprocess_mesh_with_cache(
         cache_paths=cache_paths,
         mesh=mesh,
         sdf_volume=sdf_volume,
+        surface_points=surface_points,
         cache_hit=False,
         was_watertight=was_watertight,
         repair_applied=not was_watertight,
